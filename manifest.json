@@ -1,16 +1,20 @@
 {
-  "name": "gopeed-extension-gdrive",
+  "name": "google-drive-bypass",
+  "author": "Manus",
+  "title": "Google Drive Direct Download",
+  "description": "Bypass Google Drive virus scan warning and get direct download link.",
   "version": "1.0.0",
-  "title": "Google Drive Direct Downloader",
-  "description": "Resolve Google Drive share/uc links into direct download URL (handles confirm token for large files when possible).",
-  "author": "Mazin",
+  "repository": {
+    "url": "https://github.com/Manus/gopeed-google-drive-extension"
+  },
   "scripts": [
     {
       "event": "onResolve",
       "match": {
         "urls": [
-          "*://drive.google.com/*",
-          "*://docs.google.com/uc*"
+          "*://drive.google.com/file/d/*",
+          "*://drive.google.com/uc*",
+          "*://drive.usercontent.google.com/download*"
         ]
       },
       "entry": "index.js"
