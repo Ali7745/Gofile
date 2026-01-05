@@ -1,25 +1,23 @@
-// Gopeed Extension: Google Drive Direct Download (robust)
-// Resolves Google Drive share links into a short-lived direct download URL (googleusercontent)
-// by following redirects, handling confirm tokens, and preserving cookies during resolution.
+// Gopeed Extension: Google Drive Direct + Cookie Helper (Android-friendly)
+// - Follows the "Download anyway" flow by extracting confirm token.
+// - Collects Set-Cookie values during resolution.
+// - Attaches Cookie header to the final download request (helps on Android).
+// - Displays the required cookie in the task name so you can copy it easily.
 //
-// Note: The final googleusercontent URL is usually time-limited; that's OK for immediate downloads in Gopeed.
+// Runtime: Gopeed uses goja (no browser/node APIs). fetch/XMLHttpRequest are available.
+// Docs: https://docs.gopeed.com/dev-extension.html
 
 function extractFileId(inputUrl) {
   const url = new URL(inputUrl);
   let fileId = "";
 
   if (url.hostname === "drive.google.com") {
-    // https://drive.google.com/file/d/<ID>/view
     if (url.pathname.startsWith("/file/d/")) {
       const parts = url.pathname.split("/");
       fileId = parts[3] || "";
-    }
-    // https://drive.google.com/uc?id=<ID>&export=download
-    if (!fileId && url.searchParams.has("id")) {
+    } else if (url.searchParams.has("id")) {
       fileId = url.searchParams.get("id") || "";
-    }
-    // https://drive.google.com/open?id=<ID>
-    if (!fileId && url.pathname === "/open" && url.searchParams.has("id")) {
+    } else if (url.pathname === "/open" && url.searchParams.has("id")) {
       fileId = url.searchParams.get("id") || "";
     }
   }
@@ -31,175 +29,190 @@ function extractFileId(inputUrl) {
   return fileId;
 }
 
+function safeDecode(v) {
+  try { return decodeURIComponent(v); } catch(e){ return v; }
+}
+
 function parseSetCookie(setCookieHeader) {
-  // Very small cookie jar: parse "name=value; ..." and keep name=value
-  if (!setCookieHeader) return [];
-  // Some runtimes return multiple cookies in one string separated by comma,
-  // but commas can appear in Expires. We'll split conservatively.
-  // Try to split on ", " only when it looks like a new cookie starts.
-  const parts = setCookieHeader.split(/,\s*(?=[^;=]+=[^;]+)/g);
+  // Returns [{name, value}]
   const cookies = [];
-  for (const p of parts) {
-    const nv = p.split(";")[0].trim();
-    if (nv.includes("=")) cookies.push(nv);
+  if (!setCookieHeader) return cookies;
+
+  // Some runtimes may return string or array-like joined by \n
+  const parts = String(setCookieHeader).split(/\n+/).filter(Boolean);
+  for (let p of parts) {
+    const first = p.split(";")[0];
+    const eq = first.indexOf("=");
+    if (eq > 0) {
+      const name = first.slice(0, eq).trim();
+      const value = first.slice(eq + 1).trim();
+      if (name) cookies.push({ name, value });
+    }
   }
   return cookies;
 }
 
-function mergeCookies(existing, incoming) {
-  // Keep last value per cookie name
-  const map = new Map();
-  for (const c of existing) {
-    const i = c.indexOf("=");
-    map.set(c.slice(0, i), c);
+function mergeCookieJar(jar, newOnes) {
+  for (const c of newOnes) {
+    jar[c.name] = c.value;
   }
-  for (const c of incoming) {
-    const i = c.indexOf("=");
-    map.set(c.slice(0, i), c);
-  }
-  return Array.from(map.values());
+  return jar;
 }
 
-function findConfirmToken(html) {
-  if (!html) return "";
-  // Common patterns
-  // 1) ...confirm=XXXX&id=...
-  let m = html.match(/confirm=([0-9A-Za-z_-]+)/);
-  if (m) return m[1];
+function cookieJarToHeader(jar) {
+  const pairs = [];
+  for (const k in jar) {
+    if (Object.prototype.hasOwnProperty.call(jar, k)) {
+      pairs.push(k + "=" + jar[k]);
+    }
+  }
+  return pairs.join("; ");
+}
 
-  // 2) Escaped in JSON/JS
-  m = html.match(/confirm\\u003d([0-9A-Za-z_-]+)/);
-  if (m) return m[1];
+function extractConfirmToken(html) {
+  // Typical patterns include confirm=t or confirm=<token>
+  // We'll search for confirm= in hrefs/forms
+  const m = html.match(/confirm=([0-9A-Za-z\-_]+)/);
+  return m ? m[1] : "";
+}
 
-  // 3) downloadUrl":"https:\/\/drive.usercontent.google.com\/download?...confirm=XXXX...
-  m = html.match(/downloadUrl"\s*:\s*"[^"]*confirm=([0-9A-Za-z_-]+)/);
-  if (m) return m[1];
-
+function extractFileName(html) {
+  // Try to find filename shown on the warning page
+  // We keep it best-effort; Gopeed may still resolve from headers.
+  const m = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
+  if (m && m[1]) return m[1].trim();
   return "";
 }
 
-async function fetchWithRedirects(startUrl, headers = {}, maxHops = 10) {
-  let url = startUrl;
-  let cookies = [];
-  let lastResp = null;
+async function fetchWithJar(url, jar, ua) {
+  const headers = {};
+  const cookie = cookieJarToHeader(jar);
+  if (cookie) headers["Cookie"] = cookie;
+  if (ua) headers["User-Agent"] = ua;
 
-  for (let hop = 0; hop < maxHops; hop++) {
-    const reqHeaders = { ...headers };
-    if (cookies.length) reqHeaders["cookie"] = cookies.join("; ");
+  const resp = await fetch(url, { method: "GET", redirect: "manual", headers });
+  const setCookie = resp.headers.get("set-cookie");
+  if (setCookie) mergeCookieJar(jar, parseSetCookie(setCookie));
 
-    // Use manual redirects so we can capture the final URL and keep cookies.
-    const resp = await fetch(url, {
-      method: "GET",
-      redirect: "manual",
-      headers: reqHeaders,
-    });
-
-    lastResp = resp;
-
-    const setCookie = resp.headers.get("set-cookie");
-    if (setCookie) {
-      cookies = mergeCookies(cookies, parseSetCookie(setCookie));
-    }
-
-    const loc = resp.headers.get("location");
-    const status = resp.status;
-
-    // 3xx redirect
-    if (status >= 300 && status < 400 && loc) {
-      url = new URL(loc, url).toString();
-      continue;
-    }
-
-    // Not a redirect — return response + current URL + cookies
-    return { resp, url, cookies };
-  }
-
-  return { resp: lastResp, url, cookies };
+  return resp;
 }
 
-async function resolveGoogleDriveDirect(fileId) {
-  // Prefer drive.usercontent first; it often leads to direct redirect.
-  const base1 = `https://drive.usercontent.google.com/download?id=${encodeURIComponent(fileId)}&export=download`;
-  const base2 = `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
-
-  const commonHeaders = {
-    // Some servers behave better with a UA; Gopeed runtime may set one already.
-    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  };
-
-  // Try 1: follow redirects; if we end on googleusercontent, we're done.
-  let { resp, url, cookies } = await fetchWithRedirects(base1, commonHeaders, 10);
-  if (url.includes("googleusercontent.com") && (resp?.status || 0) >= 200) {
-    return { directUrl: url };
+function joinCookies(a, b) {
+  if (!a) return b || "";
+  if (!b) return a || "";
+  // merge without duplicates by name best-effort
+  const map = {};
+  for (const part of (a + "; " + b).split(";")) {
+    const s = part.trim();
+    if (!s) continue;
+    const eq = s.indexOf("=");
+    if (eq > 0) map[s.slice(0, eq)] = s.slice(eq + 1);
   }
-
-  // If HTML page, try to find confirm token then retry with confirm
-  let body = "";
-  try {
-    const ct = resp?.headers?.get("content-type") || "";
-    if (ct.includes("text/html") || ct.includes("application/xhtml+xml")) {
-      body = await resp.text();
-    }
-  } catch (_) {}
-
-  let token = findConfirmToken(body);
-
-  // Also try cookie-based token (download_warning)
-  if (!token && cookies.length) {
-    for (const c of cookies) {
-      const name = c.split("=")[0];
-      if (name.startsWith("download_warning")) {
-        token = c.split("=").slice(1).join("="); // value
-        break;
-      }
-    }
-  }
-
-  if (token) {
-    const urlWithConfirm1 = `https://drive.usercontent.google.com/download?id=${encodeURIComponent(fileId)}&export=download&confirm=${encodeURIComponent(token)}`;
-    ({ resp, url } = await fetchWithRedirects(urlWithConfirm1, commonHeaders, 10));
-    if (url.includes("googleusercontent.com")) return { directUrl: url };
-
-    const urlWithConfirm2 = `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}&confirm=${encodeURIComponent(token)}`;
-    ({ resp, url } = await fetchWithRedirects(urlWithConfirm2, commonHeaders, 10));
-    if (url.includes("googleusercontent.com")) return { directUrl: url };
-  }
-
-  // Fallback: return a best-effort download URL (Gopeed may still handle it)
-  return { directUrl: base2 };
-}
-
-function guessNameFromCtx(ctx, fileId) {
-  // If user passed a "name" query param in referrer (some share links include it)
-  try {
-    if (ctx.req?.headers?.Referer) {
-      const r = new URL(ctx.req.headers.Referer);
-      const n = r.searchParams.get("name");
-      if (n) return n;
-    }
-  } catch (_) {}
-  return `gdrive_${fileId}`;
+  const out = [];
+  for (const k in map) out.push(k + "=" + map[k]);
+  return out.join("; ");
 }
 
 gopeed.events.onResolve(async (ctx) => {
   try {
-    const fileId = extractFileId(ctx.req.url);
-    if (!fileId) return;
+    const inputUrl = ctx.req.url;
+    const fileId = extractFileId(inputUrl);
 
-    const { directUrl } = await resolveGoogleDriveDirect(fileId);
-    const fileName = guessNameFromCtx(ctx, fileId);
+    if (!fileId) {
+      ctx.res = { name: "Google Drive", files: [{ name: "unknown", req: { url: inputUrl } }] };
+      return;
+    }
+
+    const ua = (gopeed.settings && gopeed.settings.user_agent) ? String(gopeed.settings.user_agent) : "";
+    const extraCookie = (gopeed.settings && gopeed.settings.extra_cookie) ? String(gopeed.settings.extra_cookie).trim() : "";
+
+    // We'll build a cookie jar from resolution requests
+    const jar = {};
+
+    // Step 1: hit the export=download endpoint
+    const baseUrl = "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(fileId);
+    let resp = await fetchWithJar(baseUrl, jar, ua);
+
+    // If google responds with redirect (rare here), follow it manually
+    let location = resp.headers.get("location");
+    if (location && location.startsWith("/")) location = "https://drive.google.com" + location;
+
+    // If response is 200 HTML, it may be the warning page, need confirm token
+    let finalUrl = baseUrl;
+    let cookieForUser = cookieJarToHeader(jar);
+
+    if (resp.status === 200) {
+      const ct = resp.headers.get("content-type") || "";
+      if (ct.includes("text/html")) {
+        const html = await resp.text();
+        const token = extractConfirmToken(html);
+        const guessedName = extractFileName(html);
+
+        if (token) {
+          finalUrl = baseUrl + "&confirm=" + encodeURIComponent(token);
+          // Try again with confirm token to get redirect to googleusercontent
+          resp = await fetchWithJar(finalUrl, jar, ua);
+
+          location = resp.headers.get("location");
+          if (location && location.startsWith("/")) location = "https://drive.google.com" + location;
+
+          if (location) {
+            // Some flows redirect to drive.usercontent.google.com
+            // Follow once more to get final googleusercontent URL
+            const resp2 = await fetchWithJar(location, jar, ua);
+            let loc2 = resp2.headers.get("location");
+            if (loc2 && loc2.startsWith("/")) loc2 = "https://drive.usercontent.google.com" + loc2;
+            if (loc2) finalUrl = loc2;
+            else finalUrl = location;
+          }
+
+          cookieForUser = cookieJarToHeader(jar);
+          if (guessedName) ctx.req.name = guessedName; // best-effort
+        }
+      }
+    } else if (resp.status >= 300 && resp.status < 400 && location) {
+      // Redirect chain
+      const resp2 = await fetchWithJar(location, jar, ua);
+      let loc2 = resp2.headers.get("location");
+      if (loc2 && loc2.startsWith("/")) loc2 = "https://drive.usercontent.google.com" + loc2;
+      finalUrl = loc2 || location;
+      cookieForUser = cookieJarToHeader(jar);
+    }
+
+    // Include any user-provided extra cookie
+    const effectiveCookie = joinCookies(cookieForUser, extraCookie);
+
+    // Make the cookie visible for copying (Android): put it in the task name and log it.
+    const displayCookie = effectiveCookie ? effectiveCookie : "(no cookie captured)";
+    gopeed.logger && gopeed.logger.info && gopeed.logger.info("GoogleDrive Cookie: " + displayCookie);
+
+    // Build a human-ish file name
+    let fileName = "gdrive_" + fileId;
+    // Try to keep original filename from URL query if present
+    try {
+      const u = new URL(inputUrl);
+      const n = u.searchParams.get("filename") || u.searchParams.get("name");
+      if (n) fileName = safeDecode(n);
+    } catch(e){}
 
     ctx.res = {
-      name: fileName,
+      name: fileName + " | Cookie: " + displayCookie,
       files: [
         {
           name: fileName,
-          req: { url: directUrl },
-        },
-      ],
+          req: {
+            url: finalUrl,
+            headers: (effectiveCookie || ua) ? {
+              ...(effectiveCookie ? { "Cookie": effectiveCookie } : {}),
+              ...(ua ? { "User-Agent": ua } : {})
+            } : undefined
+          }
+        }
+      ]
     };
-  } catch (e) {
-    // If anything goes wrong, let Gopeed handle the original URL as-is.
-    return;
+  } catch (err) {
+    const msg = (err && err.message) ? err.message : String(err);
+    gopeed.logger && gopeed.logger.error && gopeed.logger.error("GoogleDrive resolve error: " + msg);
+    ctx.res = { name: "Google Drive (error)", files: [{ name: "error", req: { url: ctx.req.url } }] };
   }
 });
