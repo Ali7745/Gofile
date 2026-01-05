@@ -1,12 +1,28 @@
 {
-  "name": "google-drive-bypass",
-  "author": "Manus",
-  "title": "Google Drive Direct Download",
-  "description": "Robust Google Drive resolver: handles confirm token & redirects to get direct download link.",
+  "name": "google-drive-bypass-plus",
+  "author": "MazinGPT",
+  "title": "Google Drive Direct + Cookie Helper",
+  "description": "Resolves Google Drive links, bypasses 'Download anyway', and shows the required Cookie. Also attaches the Cookie to the download request for Android.",
   "version": "1.1.0",
   "repository": {
-    "url": "https://github.com/Manus/gopeed-google-drive-extension"
+    "url": "https://example.com"
   },
+  "settings": [
+    {
+      "name": "extra_cookie",
+      "title": "Cookie إضافي (اختياري)",
+      "description": "إذا كان الملف خاص/يتطلب دخول، يمكنك إضافة Cookie يدويًا هنا وسيتم إلحاقه بالطلبات.",
+      "type": "string",
+      "value": ""
+    },
+    {
+      "name": "user_agent",
+      "title": "User-Agent (اختياري)",
+      "description": "اتركه فارغًا عادة. استخدمه فقط إذا احتجت مطابقة متصفح معيّن.",
+      "type": "string",
+      "value": ""
+    }
+  ],
   "scripts": [
     {
       "event": "onResolve",
@@ -14,6 +30,7 @@
         "urls": [
           "*://drive.google.com/file/d/*",
           "*://drive.google.com/uc*",
+          "*://drive.google.com/open*",
           "*://drive.usercontent.google.com/download*"
         ]
       },
