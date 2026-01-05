@@ -1,0 +1,19 @@
+{
+  "name": "gopeed-extension-gofile-fixed",
+  "version": "1.0.0",
+  "title": "GoFile (API Resolver) - Fixed",
+  "description": "Resolve gofile.io folder links via GoFile API and return direct download links.",
+  "author": "Mazin",
+  "scripts": [
+    {
+      "event": "onResolve",
+      "match": {
+        "urls": [
+          "*://gofile.io/d/*",
+          "*://www.gofile.io/d/*"
+        ]
+      },
+      "entry": "index.js"
+    }
+  ]
+}
