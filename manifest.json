@@ -2,8 +2,8 @@
   "name": "google-drive-bypass",
   "author": "Manus",
   "title": "Google Drive Direct Download",
-  "description": "Bypass Google Drive virus scan warning and get direct download link.",
-  "version": "1.0.0",
+  "description": "Robust Google Drive resolver: handles confirm token & redirects to get direct download link.",
+  "version": "1.1.0",
   "repository": {
     "url": "https://github.com/Manus/gopeed-google-drive-extension"
   },
