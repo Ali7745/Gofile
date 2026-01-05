@@ -1,68 +1,112 @@
-// Gopeed Extension: GoFile FULL Resolver (FINAL)
+function extractFileId(url) {
+  // 1) uc?id=FILEID
+  let m = url.match(/[?&]id=([^&]+)/i);
+  if (m) return decodeURIComponent(m[1]);
 
-function extractContentId(url) {
-  const m = url.match(/gofile\.io\/d\/([^/?#]+)/i);
-  return m ? m[1] : null;
+  // 2) /file/d/FILEID/
+  m = url.match(/\/file\/d\/([^/]+)/i);
+  if (m) return m[1];
+
+  // 3) open?id=FILEID
+  m = url.match(/\/open\?id=([^&]+)/i);
+  if (m) return decodeURIComponent(m[1]);
+
+  return null;
 }
 
-async function api(path, params = {}) {
-  const q = new URLSearchParams(params).toString();
-  const url = `https://api.gofile.io/${path}${q ? "?" + q : ""}`;
-  const r = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "application/json"
-    }
-  });
-  if (!r.ok) throw new Error(`API ${path} HTTP ${r.status}`);
-  return r.json();
+function pickConfirmToken(html) {
+  // Google Drive large file confirm token patterns
+  // 1) confirm=XXXX in download link
+  let m = html.match(/confirm=([0-9A-Za-z_]+)&amp;id=/);
+  if (m) return m[1];
+
+  m = html.match(/confirm=([0-9A-Za-z_]+)&id=/);
+  if (m) return m[1];
+
+  // 2) Sometimes "download_warning" cookie is set; but token still in page
+  return null;
+}
+
+function pickFilenameFromHeaders(headers) {
+  const cd = headers.get("content-disposition") || "";
+  // content-disposition: attachment; filename="..."
+  let m = cd.match(/filename\*?=(?:UTF-8''|")?([^\";]+)/i);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1].replace(/"/g, "").trim());
+  } catch {
+    return m[1].replace(/"/g, "").trim();
+  }
 }
 
 gopeed.events.onResolve(async (ctx) => {
-  const contentId = extractContentId(ctx.req.url);
-  if (!contentId) throw new Error("Invalid GoFile URL");
+  const inUrl = ctx.req.url;
+  const fileId = extractFileId(inUrl);
 
-  // 1️⃣ getContent
-  const meta = await api("getContent", { contentId });
-
-  if (meta.status !== "ok") {
-    throw new Error("GoFile getContent failed");
+  if (!fileId) {
+    throw new Error("Google Drive: cannot extract file id");
   }
 
-  const contents = Object.values(meta.data.contents || {});
-  const files = contents.filter(it => it.type === "file");
+  const base = `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
 
-  if (!files.length) {
-    throw new Error("No files found in GoFile folder");
+  // 1) First request (may return file directly or a confirm page)
+  const r1 = await fetch(base, {
+    redirect: "manual",
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+  });
+
+  // If Google responds with redirect to direct download
+  const loc1 = r1.headers.get("location");
+  if (loc1) {
+    ctx.res = {
+      name: `gdrive_${fileId}`,
+      files: [{ name: `gdrive_${fileId}`, req: { url: loc1, headers: { "User-Agent": "Mozilla/5.0" } } }]
+    };
+    return;
   }
 
-  const out = [];
+  const ct1 = r1.headers.get("content-type") || "";
 
-  for (const f of files) {
-    // 2️⃣ generateDownloadLink (THIS IS THE KEY)
-    const dl = await api("generateDownloadLink", {
-      fileId: f.id
-    });
+  // If it's already the file (not HTML)
+  if (!ct1.includes("text/html")) {
+    const filename = pickFilenameFromHeaders(r1.headers) || `gdrive_${fileId}`;
+    ctx.res = {
+      name: filename,
+      files: [{ name: filename, req: { url: base, headers: { "User-Agent": "Mozilla/5.0" } } }]
+    };
+    return;
+  }
 
-    if (dl.status !== "ok") continue;
+  // 2) HTML confirm page: extract confirm token
+  const html = await r1.text();
+  const confirm = pickConfirmToken(html);
 
-    out.push({
-      name: f.name,
-      req: {
-        url: dl.data.downloadUrl,
-        headers: {
-          "User-Agent": "Mozilla/5.0"
+  if (!confirm) {
+    // Could be permission/login/blocked
+    throw new Error(
+      "Google Drive: confirm token not found. The file may require permission/login, or Google blocked automated download."
+    );
+  }
+
+  const finalUrl = `https://drive.google.com/uc?export=download&confirm=${encodeURIComponent(confirm)}&id=${encodeURIComponent(fileId)}`;
+
+  // 3) Return final URL to Gopeed (Google will then stream the file)
+  ctx.res = {
+    name: `gdrive_${fileId}`,
+    files: [
+      {
+        name: `gdrive_${fileId}`,
+        req: {
+          url: finalUrl,
+          headers: {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://drive.google.com/"
+          }
         }
       }
-    });
-  }
-
-  if (!out.length) {
-    throw new Error("Failed to generate direct download links");
-  }
-
-  ctx.res = {
-    name: out.length === 1 ? out[0].name : `gofile_${contentId}`,
-    files: out
+    ]
   };
 });
