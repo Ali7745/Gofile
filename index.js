@@ -1,112 +1,46 @@
-function extractFileId(url) {
-  // 1) uc?id=FILEID
-  let m = url.match(/[?&]id=([^&]+)/i);
-  if (m) return decodeURIComponent(m[1]);
+gopeed.events.onResolve((ctx) => {
+  const url = new URL(ctx.req.url);
+  let fileId = "";
 
-  // 2) /file/d/FILEID/
-  m = url.match(/\/file\/d\/([^/]+)/i);
-  if (m) return m[1];
-
-  // 3) open?id=FILEID
-  m = url.match(/\/open\?id=([^&]+)/i);
-  if (m) return decodeURIComponent(m[1]);
-
-  return null;
-}
-
-function pickConfirmToken(html) {
-  // Google Drive large file confirm token patterns
-  // 1) confirm=XXXX in download link
-  let m = html.match(/confirm=([0-9A-Za-z_]+)&amp;id=/);
-  if (m) return m[1];
-
-  m = html.match(/confirm=([0-9A-Za-z_]+)&id=/);
-  if (m) return m[1];
-
-  // 2) Sometimes "download_warning" cookie is set; but token still in page
-  return null;
-}
-
-function pickFilenameFromHeaders(headers) {
-  const cd = headers.get("content-disposition") || "";
-  // content-disposition: attachment; filename="..."
-  let m = cd.match(/filename\*?=(?:UTF-8''|")?([^\";]+)/i);
-  if (!m) return null;
-  try {
-    return decodeURIComponent(m[1].replace(/"/g, "").trim());
-  } catch {
-    return m[1].replace(/"/g, "").trim();
+  // Extract file ID from different URL formats
+  if (url.hostname === "drive.google.com") {
+    if (url.pathname.startsWith("/file/d/")) {
+      fileId = url.pathname.split("/")[3];
+    } else if (url.searchParams.has("id")) {
+      fileId = url.searchParams.get("id");
+    }
+  } else if (url.hostname === "drive.usercontent.google.com") {
+    fileId = url.searchParams.get("id");
   }
-}
-
-gopeed.events.onResolve(async (ctx) => {
-  const inUrl = ctx.req.url;
-  const fileId = extractFileId(inUrl);
 
   if (!fileId) {
-    throw new Error("Google Drive: cannot extract file id");
-  }
-
-  const base = `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
-
-  // 1) First request (may return file directly or a confirm page)
-  const r1 = await fetch(base, {
-    redirect: "manual",
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
-  });
-
-  // If Google responds with redirect to direct download
-  const loc1 = r1.headers.get("location");
-  if (loc1) {
-    ctx.res = {
-      name: `gdrive_${fileId}`,
-      files: [{ name: `gdrive_${fileId}`, req: { url: loc1, headers: { "User-Agent": "Mozilla/5.0" } } }]
-    };
     return;
   }
 
-  const ct1 = r1.headers.get("content-type") || "";
+  // Construct the direct download URL with confirm=t
+  // This bypasses the virus scan warning for large files
+  const directUrl = `https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`;
 
-  // If it's already the file (not HTML)
-  if (!ct1.includes("text/html")) {
-    const filename = pickFilenameFromHeaders(r1.headers) || `gdrive_${fileId}`;
-    ctx.res = {
-      name: filename,
-      files: [{ name: filename, req: { url: base, headers: { "User-Agent": "Mozilla/5.0" } } }]
-    };
-    return;
+  // Try to get the file name from the original URL if possible
+  let fileName = "file"; // Default name
+  if (ctx.req.headers && ctx.req.headers['Referer']) {
+      const refererUrl = new URL(ctx.req.headers['Referer']);
+      const nameParam = refererUrl.searchParams.get('name');
+      if (nameParam) {
+          fileName = nameParam;
+      }
   }
 
-  // 2) HTML confirm page: extract confirm token
-  const html = await r1.text();
-  const confirm = pickConfirmToken(html);
 
-  if (!confirm) {
-    // Could be permission/login/blocked
-    throw new Error(
-      "Google Drive: confirm token not found. The file may require permission/login, or Google blocked automated download."
-    );
-  }
-
-  const finalUrl = `https://drive.google.com/uc?export=download&confirm=${encodeURIComponent(confirm)}&id=${encodeURIComponent(fileId)}`;
-
-  // 3) Return final URL to Gopeed (Google will then stream the file)
   ctx.res = {
-    name: `gdrive_${fileId}`,
+    name: fileName,
     files: [
       {
-        name: `gdrive_${fileId}`,
+        name: fileName, // Gopeed will usually resolve the real name from headers
         req: {
-          url: finalUrl,
-          headers: {
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://drive.google.com/"
-          }
-        }
-      }
-    ]
+          url: directUrl,
+        },
+      },
+    ],
   };
 });
