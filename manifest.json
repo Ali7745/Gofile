@@ -1,16 +1,16 @@
 {
-  "name": "gopeed-extension-gofile-fixed",
+  "name": "gopeed-extension-gdrive",
   "version": "1.0.0",
-  "title": "GoFile (API Resolver) - Fixed",
-  "description": "Resolve gofile.io folder links via GoFile API and return direct download links.",
+  "title": "Google Drive Direct Downloader",
+  "description": "Resolve Google Drive share/uc links into direct download URL (handles confirm token for large files when possible).",
   "author": "Mazin",
   "scripts": [
     {
       "event": "onResolve",
       "match": {
         "urls": [
-          "*://gofile.io/d/*",
-          "*://www.gofile.io/d/*"
+          "*://drive.google.com/*",
+          "*://docs.google.com/uc*"
         ]
       },
       "entry": "index.js"
